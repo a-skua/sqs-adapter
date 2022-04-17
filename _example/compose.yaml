@@ -1,0 +1,24 @@
+version: "3.9"
+services:
+  aws:
+    image: amazon/aws-cli
+    environment: &aws_env
+      AWS_ACCESS_KEY_ID: foo
+      AWS_SECRET_ACCESS_KEY: bar
+      AWS_DEFAULT_REGION: ap-northeast-1
+    depends_on:
+      - sqs
+
+  sqs:
+    image: softwaremill/elasticmq
+
+  worker:
+    build:
+      context: ..
+      dockerfile: _example/Dockerfile
+    environment:
+      <<: *aws_env
+      SQS_ENDPOINT: http://sqs:9324
+      QUEUE_URL: http://sqs:9324/000000000000/queue
+    depends_on:
+      - sqs
