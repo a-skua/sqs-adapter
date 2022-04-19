@@ -2,8 +2,6 @@ package adapter
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"time"
@@ -11,59 +9,6 @@ import (
 
 // Closed signal
 type Closed struct{}
-
-// Log value
-type Log any
-
-type ActionType uint8
-
-const (
-	_ ActionType = iota
-	ActionTypeClosed
-	ActionTypeReceivingMessage
-	ActionTypeReceivedMessage
-	ActionTypeChangingMessageVisibilityTimeout
-	ActionTypeChangedMessageVisibilityTimeout
-	ActionTypeDeletingMessage
-	ActionTypeDeletedMessage
-)
-
-func (a ActionType) String() string {
-	switch a {
-	case ActionTypeClosed:
-		return "closed"
-	case ActionTypeReceivingMessage:
-		return "receiving_message"
-	case ActionTypeReceivedMessage:
-		return "received_message"
-	case ActionTypeChangingMessageVisibilityTimeout:
-		return "changing_message_visibility_timeout"
-	case ActionTypeChangedMessageVisibilityTimeout:
-		return "changed_message_visibility_timeout"
-	case ActionTypeDeletingMessage:
-		return "deleting_message"
-	case ActionTypeDeletedMessage:
-		return "deleted_message"
-	default:
-		return "unknown"
-	}
-}
-
-func (a ActionType) MarshalJSON() ([]byte, error) {
-	return json.Marshal(a.String())
-}
-
-type LogMessage struct {
-	ActionType ActionType `json:"action_type"`
-	Detail     any        `json:"detail"`
-}
-
-func (msg LogMessage) String() string {
-	if msg.Detail == nil {
-		return msg.ActionType.String()
-	}
-	return fmt.Sprintf("%s: %v", msg.ActionType, msg.Detail)
-}
 
 // Worker
 type Worker func(context.Context, types.Message) error
@@ -118,17 +63,18 @@ type sqsClient interface {
 	ChangeMessageVisibility(context.Context, *sqs.ChangeMessageVisibilityInput, ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityOutput, error)
 }
 
+// receiveController implements ReceiveController
 type receiveController struct {
-	client        sqsClient
-	queueURL      string
-	receiveOption ReceiveOption
+	client   sqsClient
+	queueURL string
+	option   ReceiveOption
 }
 
 func NewReceiveController(c *sqs.Client, cfg *ReceiveControllerConfig) ReceiveController {
 	return &receiveController{
-		client:        c,
-		queueURL:      cfg.QueueURL,
-		receiveOption: cfg.ReceiveOption,
+		client:   c,
+		queueURL: cfg.QueueURL,
+		option:   cfg.ReceiveOption,
 	}
 }
 
@@ -139,6 +85,10 @@ func (ctrl *receiveController) Run(ctx context.Context, work Worker) (<-chan Clo
 	go ctrl.run(ctx, work, closing, log)
 
 	return closing, log
+}
+
+func (ctrl *receiveController) newReceiveMessageInput() *sqs.ReceiveMessageInput {
+	return ctrl.option.newReceiveMessageInput(&ctrl.queueURL)
 }
 
 // run call from Run within goroutine.
@@ -167,10 +117,6 @@ loop:
 			}
 		}
 	}
-}
-
-func (ctrl *receiveController) newReceiveMessageInput() *sqs.ReceiveMessageInput {
-	return ctrl.receiveOption.newReceiveMessageInput(&ctrl.queueURL)
 }
 
 func (ctrl *receiveController) do(ctx context.Context, work Worker, m types.Message, log chan<- Log) {
@@ -204,13 +150,13 @@ func (ctrl *receiveController) deleteMessage(ctx context.Context, m types.Messag
 }
 
 func (ctrl *receiveController) changeMessageVisibility(ctx context.Context, m types.Message, log chan<- Log) {
-	if !ctrl.receiveOption.DoChangeMessageVisibolity {
+	if !ctrl.option.DoChangeMessageVisibolity {
 		return
 	}
 
 	for {
 		select {
-		case <-time.After(ctrl.receiveOption.ChangeMessageVisibilityAfter):
+		case <-time.After(ctrl.option.ChangeMessageVisibilityAfter):
 			log <- &LogMessage{ActionType: ActionTypeChangingMessageVisibilityTimeout, Detail: *m.ReceiptHandle}
 
 			_, err := ctrl.client.ChangeMessageVisibility(ctx, &sqs.ChangeMessageVisibilityInput{
