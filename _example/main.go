@@ -45,7 +45,7 @@ func main() {
 		ChangeMessageVisibilityAfter: 7 * time.Second,
 	}
 
-	receive := adapter.NewReceiveController(sqsClient, &adapter.WorkerConfig{
+	receive := adapter.NewReceiveController(sqsClient, &adapter.ReceiveControllerConfig{
 		QueueURL:      queueURL,
 		ReceiveOption: receiveOption,
 	})
@@ -61,8 +61,9 @@ func main() {
 
 	closed, logging := receive.Run(ctx, func(ctx context.Context, m types.Message) error {
 		log.Println("---receive message---")
-		log.Println("\tsleeping...10s")
+		log.Println("\tID  :", *m.MessageId)
 
+		log.Println("\tsleeping...10s")
 		select {
 		case <-time.After(10 * time.Second):
 			log.Println("\tID  :", *m.MessageId)

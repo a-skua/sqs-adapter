@@ -10,6 +10,8 @@ import (
 	"time"
 )
 
+// TODO writing tests
+
 type mockClient struct {
 	// ReceiveMessage
 	waitReceiveMessage     time.Duration
@@ -26,6 +28,24 @@ type mockClient struct {
 	countDeleteMessage    int
 	responseDeleteMessage *sqs.DeleteMessageOutput
 	errorDeleteMessage    error
+}
+
+type mockMessage struct {
+	id            string
+	receiptHandle string
+}
+
+func (m mockMessage) newMessage() types.Message {
+	return types.Message{
+		MessageId:     &m.id,
+		ReceiptHandle: &m.receiptHandle,
+	}
+}
+
+func (c1 *mockClient) Eq(c2 *mockClient) bool {
+	return c1.countReceiveMessage == c2.countReceiveMessage &&
+		c1.countChangeMessageVisibility == c2.countChangeMessageVisibility &&
+		c1.countDeleteMessage == c2.countDeleteMessage
 }
 
 func (c *mockClient) ReceiveMessage(ctx context.Context, in *sqs.ReceiveMessageInput, ops ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
@@ -191,7 +211,7 @@ func TestReceiveController_Run(t *testing.T) {
 		controller *receiveController // .client: *mockClient
 		worker     Worker
 		wait       time.Duration
-		sqsClient  sqsClient // *mockClient
+		want       *mockClient
 	}
 
 	do := func(tt test) {
@@ -199,23 +219,26 @@ func TestReceiveController_Run(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			closed, log := tt.controller.Run(ctx, tt.worker)
 
-            go func() {
-                select {
-                case <-log:
-                case _, ok := <-closed:
-                    if !ok {
-                        return
-                    }
-                }
-            }()
+			go func() {
+				for {
+					select {
+					case l := <-log:
+						t.Log(l)
+					case _, ok := <-closed:
+						if !ok {
+							return
+						}
+					}
+				}
+			}()
 
 			time.Sleep(tt.wait)
 			cancel()
 
-			got := tt.controller.client
-			want := tt.sqsClient
+			got := tt.controller.client.(*mockClient)
+			want := tt.want
 
-			if !reflect.DeepEqual(want, got) {
+			if !want.Eq(got) {
 				t.Fatalf("want=%v, got=%v.", want, got)
 			}
 
@@ -233,7 +256,6 @@ func TestReceiveController_Run(t *testing.T) {
 				queueURL: "",
 				client: &mockClient{
 					waitReceiveMessage:     1 * time.Second,
-					countReceiveMessage:    0,
 					responseReceiveMessage: &sqs.ReceiveMessageOutput{},
 				},
 			},
@@ -241,10 +263,10 @@ func TestReceiveController_Run(t *testing.T) {
 				return nil
 			},
 			wait: 100 * time.Millisecond,
-			sqsClient: &mockClient{
-				waitReceiveMessage:     1 * time.Second,
-				countReceiveMessage:    1,
-				responseReceiveMessage: &sqs.ReceiveMessageOutput{},
+			want: &mockClient{
+				countReceiveMessage:          1,
+				countDeleteMessage:           0,
+				countChangeMessageVisibility: 0,
 			},
 		},
 		{
@@ -261,10 +283,10 @@ func TestReceiveController_Run(t *testing.T) {
 				return errors.New("failed worker")
 			},
 			wait: 100 * time.Millisecond,
-			sqsClient: &mockClient{
-				waitReceiveMessage:     70 * time.Millisecond,
-				countReceiveMessage:    2,
-				responseReceiveMessage: &sqs.ReceiveMessageOutput{},
+			want: &mockClient{
+				countReceiveMessage:          2,
+				countDeleteMessage:           0,
+				countChangeMessageVisibility: 0,
 			},
 		},
 		{
@@ -273,22 +295,18 @@ func TestReceiveController_Run(t *testing.T) {
 				queueURL: "",
 				client: &mockClient{
 					waitReceiveMessage:     70 * time.Millisecond,
-					countReceiveMessage:    0,
 					responseReceiveMessage: &sqs.ReceiveMessageOutput{},
 					waitDeleteMessage:      1 * time.Millisecond,
-					countDeleteMessage:     0,
 				},
 			},
 			worker: func(context.Context, types.Message) error {
 				return nil
 			},
 			wait: 100 * time.Millisecond,
-			sqsClient: &mockClient{
-				waitReceiveMessage:     70 * time.Millisecond,
-				countReceiveMessage:    2,
-				responseReceiveMessage: &sqs.ReceiveMessageOutput{},
-				waitDeleteMessage:      1 * time.Millisecond,
-				countDeleteMessage:     0,
+			want: &mockClient{
+				countReceiveMessage:          2,
+				countDeleteMessage:           0,
+				countChangeMessageVisibility: 0,
 			},
 		},
 		{
@@ -296,33 +314,24 @@ func TestReceiveController_Run(t *testing.T) {
 			controller: &receiveController{
 				queueURL: "",
 				client: &mockClient{
-					waitReceiveMessage:  70 * time.Millisecond,
-					countReceiveMessage: 0,
+					waitReceiveMessage: 70 * time.Millisecond,
 					responseReceiveMessage: &sqs.ReceiveMessageOutput{
 						Messages: []types.Message{
-							{},
-						{},
-						{},
+							(mockMessage{"foo", "foo#bar"}).newMessage(),
+							(mockMessage{"foo", "foo#bar"}).newMessage(),
+							(mockMessage{"foo", "foo#bar"}).newMessage(),
 						},
 					},
-					countDeleteMessage: 0,
 				},
 			},
 			worker: func(context.Context, types.Message) error {
 				return nil
 			},
 			wait: 100 * time.Millisecond,
-			sqsClient: &mockClient{
-				waitReceiveMessage:  70 * time.Millisecond,
-				countReceiveMessage: 2,
-				responseReceiveMessage: &sqs.ReceiveMessageOutput{
-					Messages: []types.Message{
-						{},
-						{},
-						{},
-					},
-				},
-				countDeleteMessage: 3,
+			want: &mockClient{
+				countReceiveMessage:          2,
+				countDeleteMessage:           3,
+				countChangeMessageVisibility: 0,
 			},
 		},
 		{
@@ -330,15 +339,12 @@ func TestReceiveController_Run(t *testing.T) {
 			controller: &receiveController{
 				queueURL: "",
 				client: &mockClient{
-					waitReceiveMessage:  1 * time.Millisecond,
-					countReceiveMessage: 0,
+					waitReceiveMessage: 1 * time.Millisecond,
 					responseReceiveMessage: &sqs.ReceiveMessageOutput{
 						Messages: []types.Message{
-							{},
+							(mockMessage{"foo", "foo#bar"}).newMessage(),
 						},
 					},
-					countDeleteMessage:           0,
-					countChangeMessageVisibility: 0,
 				},
 				receiveOption: ReceiveOption{
 					DoChangeMessageVisibolity:    true,
@@ -354,14 +360,8 @@ func TestReceiveController_Run(t *testing.T) {
 				}
 			},
 			wait: 100 * time.Millisecond,
-			sqsClient: &mockClient{
-				waitReceiveMessage:  1 * time.Millisecond,
-				countReceiveMessage: 1,
-				responseReceiveMessage: &sqs.ReceiveMessageOutput{
-					Messages: []types.Message{
-						{},
-					},
-				},
+			want: &mockClient{
+				countReceiveMessage:          1,
 				countDeleteMessage:           0,
 				countChangeMessageVisibility: 1,
 			},
@@ -371,15 +371,12 @@ func TestReceiveController_Run(t *testing.T) {
 			controller: &receiveController{
 				queueURL: "",
 				client: &mockClient{
-					waitReceiveMessage:  30 * time.Millisecond,
-					countReceiveMessage: 0,
+					waitReceiveMessage: 30 * time.Millisecond,
 					responseReceiveMessage: &sqs.ReceiveMessageOutput{
 						Messages: []types.Message{
-							{},
+							(mockMessage{"foo", "foo#bar"}).newMessage(),
 						},
 					},
-					countDeleteMessage:           0,
-					countChangeMessageVisibility: 0,
 				},
 				receiveOption: ReceiveOption{
 					DoChangeMessageVisibolity:    true,
@@ -387,22 +384,16 @@ func TestReceiveController_Run(t *testing.T) {
 				},
 			},
 			worker: func(ctx context.Context, msg types.Message) error {
-                select {
-                case <-ctx.Done():
-                    return errors.New("canceled")
-                case <-time.After(60 * time.Millisecond):
-                    return nil
-                }
+				select {
+				case <-ctx.Done():
+					return errors.New("canceled")
+				case <-time.After(60 * time.Millisecond):
+					return nil
+				}
 			},
 			wait: 100 * time.Millisecond,
-			sqsClient: &mockClient{
-				waitReceiveMessage:  30 * time.Millisecond,
-				countReceiveMessage: 2,
-				responseReceiveMessage: &sqs.ReceiveMessageOutput{
-					Messages: []types.Message{
-						{},
-					},
-				},
+			want: &mockClient{
+				countReceiveMessage:          2,
 				countDeleteMessage:           1,
 				countChangeMessageVisibility: 1,
 			},
